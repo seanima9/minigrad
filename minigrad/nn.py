@@ -1,131 +1,87 @@
 import numpy as np
-from collections import deque
+from minigrad.tensor import Tensor
+from abc import ABC, abstractmethod
 
-class Tensor:
-    def __init__(self, data, _parents=(), requires_grad=False, precision=np.float32):
-        self.data = np.array(data, dtype=precision)
-        self.requires_grad = requires_grad
-        self.grad = np.zeros_like(self.data, dtype=precision)
-        self.shape = self.data.shape
-        self._backward_fn = lambda: None
-        self.parents = set(_parents)
+
+class Layer:
+    def __init__(self, in_size, out_size, activation='relu', weight_init='he', precision=np.float32,):
+        initializers = {
+            'std_normal': lambda shape: np.random.normal(0, 1, shape),
+            'he': lambda shape: np.random.randn(*shape) * np.sqrt(2.0 / shape[1]),
+            'xavier': lambda shape: np.random.randn(*shape) * np.sqrt(2.0 / (shape[1] + shape[0])),
+        }
+        if weight_init not in initializers:
+            raise ValueError(f"Unknown weight initialization method: {weight_init}")
+        weight_init_fn = initializers[weight_init]
+
+        self.weights = Tensor(weight_init_fn((in_size, out_size)), requires_grad=True, precision=precision)
+        self.bias = Tensor(np.zeros((1, out_size), dtype=precision), requires_grad=True, precision=precision)
+        self.activation = activation
+        self.weight_init = weight_init
+        self.precision = precision
+        
+    def __call__(self, x):
+        z = x @ self.weights + self.bias
+        activation_fn = getattr(z, self.activation)
+        if activation_fn is None:
+            raise ValueError(f"Unknown activation function: {self.activation}")
+        out = activation_fn()
+        return out
+        
+    def parameters(self):
+        return [self.weights, self.bias]
 
     def __repr__(self):
-        return f"Tensor(shape={self.shape}, requires_grad={self.requires_grad})"
+        return f"Layer(in_size={self.weights.shape[1]}, out_size={self.weights.shape[0]}, activation={self.activation}, weight_init={self.weight_init}, precision={self.precision})"
 
-    def __add__(self, other):
-        other = other if isinstance(other, Tensor) else Tensor(other)
-        assert self.shape == other.shape, f"Shape mismatch for addition: {self.shape} vs {other.shape}"
-        out = Tensor(self.data + other.data , _parents=(self,other), requires_grad=self.requires_grad) 
-        
-        def _backward_fn():
-            if self.requires_grad:
-                self.grad += out.grad # += to allow for nodes with multiple parents
-            if other.requires_grad:
-                other.grad += out.grad
-        out._backward_fn = _backward_fn
 
-        return out
-
-    def __mul__(self, other): # element-wise mult
-        other = other if isinstance(other, Tensor) else Tensor(other)
-        assert self.shape == other.shape, f"Shape mismatch for hadamard product: {self.shape} vs {other.shape}"
-        
-        out = Tensor(self.data * other.data, _parents=(self, other), requires_grad=self.requires_grad)
-
-        def _backward_fn():
-            if self.requires_grad:
-                self.grad += out.grad * other.data
-            if other.requires_grad:
-                other.grad += out.grad * self.data
-        out._backward_fn = _backward_fn
-        
-        return out
-
-    def __pow__(self, power):
-        assert isinstance(power, (int, float)), "Power must be a scalar"
-        out = Tensor(self.data ** power, _parents=(self,), requires_grad=self.requires_grad)
-
-        def _backward_fn():
-            if self.requires_grad:
-                self.grad += out.grad * (power * self.data ** (power - 1))
-        out._backward_fn = _backward_fn
-
-        return out
+class MLP:
+    def __init__(self, layers, precision=np.float32, weight_init='he', activation='relu'):
+        self.layers = []
+        for i in range(len(layers) - 1):
+            self.layers.append(Layer(layers[i], layers[i + 1], activation=activation,
+                                     weight_init=weight_init, precision=precision)) 
     
-    def __matmul__(self, other):
-        other = other if isinstance(other, Tensor) else Tensor(other)
-        assert self.shape[-1] == other.shape[0], f"Shape mismatch for matrix multiplication: {self.shape} vs {other.shape}"
+    def __call__(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
 
-        out = Tensor(np.matmul(self.data, other.data), _parents=(self, other), requires_grad=self.requires_grad)
-        def _backward_fn():
-            if self.requires_grad:
-                self.grad += out.grad @ other.data.T
-            if other.requires_grad:
-                other.grad += self.data.T @ out.grad
-        out._backward_fn = _backward_fn
+    def __repr__(self):
+        return f"MLP(layers={self.layers})"
 
-        return out
+    def parameters(self):
+        params = []
+        for layer in self.layers:
+            params.extend(layer.parameters())
+        return params
 
-    def __neg__(self):
-        return self * -1
 
-    def __sub__(self, other):
-        return self + (-other)
-
-    def __truediv__(self, other):
-        return self * (other ** -1)
-   
-    def __radd__(self, other):
-        return self + other
-
-    def __rsub__(self, other):
-        return other + (-self)
+class Optimizer(ABC):
+    def __init__(self, parameters):
+        self.parameters = parameters
     
-    def __rmul__(self, other):
-        return self * other
-
-    def __rtruediv__(self, other):
-        return other * (self**-1)
+    def zero_grad(self):
+        for p in self.parameters:
+            p.grad = np.zeros_like(p.data)
     
-    def relu(self):
-        out = Tensor(np.maximum(0, self.data), _parents=(self,), requires_grad=self.requires_grad)
+    @abstractmethod
+    def step(self):
+        raise NotImplementedError
 
-        def _backward_fn():
-            if self.requires_grad:
-                self.grad += out.grad * (self.data > 0).astype(self.data.dtype)
-        out._backward_fn = _backward_fn
 
-        return out
+class SGD(Optimizer):
+    def __init__(self, parameters, lr=0.01):
+        super().__init__(parameters)
+        self.lr = lr
 
-    def sigmoid(self):
-        sig = 1 / (1 + np.exp(-self.data))
-        sig_deriv = sig * (1 - sig)
-        out = Tensor(sig, _parents=(self,), requires_grad=self.requires_grad)
+    def step(self):
+        for p in self.parameters:
+            p.data -= self.lr * p.grad
 
-        def _backward_fn():
-            if self.requires_grad:
-                self.grad += out.grad * sig_deriv
-        out._backward_fn = _backward_fn
+    def __repr__(self):
+        return f"SGD(lr={self.lr})"
 
-        return out
 
-    def backward(self):
-        reverse_topo = []
-        visited = set()
-        queue = deque([self])
-        while queue:
-            node = queue.popleft()
-            if node in visited:
-                continue
-            visited.add(node)
-            reverse_topo.append(node) # adds to right end
-            for parent in node.parents:
-                if parent not in visited:
-                    queue.append(parent)
-        
-        if self.requires_grad: self.grad = np.ones_like(self.data, dtype=self.data.dtype)
-        for node in reverse_topo:
-            if node.requires_grad:
-                node._backward_fn()
-         
+def mse_loss(pred, target): return ((pred - target) ** 2).mean()
+
