@@ -16,21 +16,19 @@ class Tensor:
 
     def __add__(self, other):
         other = other if isinstance(other, Tensor) else Tensor(other)
-        assert self.shape == other.shape, f"Shape mismatch for addition: {self.shape} vs {other.shape}"
-        out = Tensor(self.data + other.data , _parents=(self,other), requires_grad=self.requires_grad) 
-        
+        out = Tensor(self.data + other.data , _parents=(self,other), requires_grad=self.requires_grad)
         def _backward_fn():
+            # bias grad shape is (layer_size), out grad shape is (batch_size, layer_size) so .sum()
             if self.requires_grad:
-                self.grad += out.grad # += to allow for nodes with multiple parents
+                self.grad += out.grad.sum(axis=0) # += to allow for nodes with multiple parents
             if other.requires_grad:
-                other.grad += out.grad
+                other.grad += out.grad.sum(axis=0)
         out._backward_fn = _backward_fn
 
         return out
 
     def __mul__(self, other): # element-wise mult
         other = other if isinstance(other, Tensor) else Tensor(other)
-        assert self.shape == other.shape, f"Shape mismatch for hadamard product: {self.shape} vs {other.shape}"
         
         out = Tensor(self.data * other.data, _parents=(self, other), requires_grad=self.requires_grad)
 
@@ -113,14 +111,13 @@ class Tensor:
 
     def mean(self):
         out = Tensor(np.mean(self.data), _parents=(self,), requires_grad=self.requires_grad)
-
         def _backward_fn():
             if self.requires_grad:
                 self.grad += out.grad * np.ones_like(self.data) / self.data.size
                 out._backward_fn = _backward_fn
-            out._backward_fn = _backward_fn
-
-            return out
+        out._backward_fn = _backward_fn
+        
+        return out
 
     def backward(self):
         # sort nodes before every backward pass to allow for dynamic graphs
@@ -137,7 +134,7 @@ class Tensor:
                 if parent not in visited:
                     queue.append(parent)
         
-        # .backward() should be called on loss, dL/dL=1
+        # .backward() should be called on the loss tensor, dL/dL=1
         self.grad = np.ones_like(self.data, dtype=self.data.dtype)
         for node in reverse_topo:
             if node.requires_grad:

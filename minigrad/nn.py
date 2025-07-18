@@ -1,6 +1,5 @@
 import numpy as np
 from minigrad.tensor import Tensor
-from abc import ABC, abstractmethod
 
 
 class Layer:
@@ -15,12 +14,14 @@ class Layer:
         weight_init_fn = initializers[weight_init]
 
         self.weights = Tensor(weight_init_fn((in_size, out_size)), requires_grad=True, precision=precision)
-        self.bias = Tensor(np.zeros((1, out_size), dtype=precision), requires_grad=True, precision=precision)
+        self.bias = Tensor(np.zeros((out_size), dtype=precision), requires_grad=True, precision=precision)
         self.activation = activation
         self.weight_init = weight_init
         self.precision = precision
         
     def __call__(self, x):
+        # (batch_size, in_size) @ (in_size, out_size) = (batch_size, out_size)
+        # bias vector is broadcasted automatically from (out_size) to (batch_size, out_size)
         z = x @ self.weights + self.bias
         activation_fn = getattr(z, self.activation)
         if activation_fn is None:
@@ -55,33 +56,4 @@ class MLP:
         for layer in self.layers:
             params.extend(layer.parameters())
         return params
-
-
-class Optimizer(ABC):
-    def __init__(self, parameters):
-        self.parameters = parameters
-    
-    def zero_grad(self):
-        for p in self.parameters:
-            p.grad = np.zeros_like(p.data)
-    
-    @abstractmethod
-    def step(self):
-        raise NotImplementedError
-
-
-class SGD(Optimizer):
-    def __init__(self, parameters, lr=0.01):
-        super().__init__(parameters)
-        self.lr = lr
-
-    def step(self):
-        for p in self.parameters:
-            p.data -= self.lr * p.grad
-
-    def __repr__(self):
-        return f"SGD(lr={self.lr})"
-
-
-def mse_loss(pred, target): return ((pred - target) ** 2).mean()
 
